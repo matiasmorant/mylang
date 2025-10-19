@@ -5,11 +5,13 @@ import logging
 from lark import logger
 logger.setLevel(logging.DEBUG)
 
+# obj keys variables 3 cases: symbol, existing variable, name arg
+
 # maybe :; should be implemented as a builtin macro (parse as separator symbol)
 # each ()[]{}"" define their own parser?
 parser = Lark(
 r"""
-    start: expr+
+    start: _listof{expr}
     ?expr: SYM | NUMBER | STRING | paren | bracket | braces | chunk
     _S: WS
     mydef: expr _S* ":" _S* expr
@@ -44,27 +46,56 @@ class MyTransformer(Transformer):
     NUMBER = lambda self, tok: Number(float(v(tok)))
     SYM    = lambda self, tok: Symbol(v(tok))
     STRING = lambda self, tok: String(v(tok))
-    def paren   (self, *args):return Paren   (args)
-    def bracket (self, *args):return Bracket (args)
-    def braces  (self, *args):return Braces  (args)
-    def chunk   (self, *args):return Paren   (args)
-    # mydef?
+
+    def paren   (self, *args):return Paren.new(args)
+    def bracket (self, *args):return Bracket.new(args)
+    def braces  (self, *args):return Braces.new(args)
+    def chunk   (self, *args):return Paren.new(args)
+    def mydef   (self, k,v):return Mydef(k,v)
 
 class Base():
+    def eval(self, ps):return [self]
     def run(self, ps):
         ps.stack.append(self)
     # def __repr__(self):
     #     return f"({type(self)} {str(self)})"
 
-class Symbol  (str   ,Base):pass
-    # # does this go here?
-    # def eval(self, ps): return ps.dict[self] if self in ps.dict else self
-
+class Symbol  (str   ,Base):
+    def eval(self, ps): return [ps.dict.get(self,self)]
+    def run(self, ps):
+        if self in ps.dict: ps.dict[self].run()
+        else: ps.stack.append(self)
+        
 class Number  (float ,Base):pass
 class String  (str   ,Base):pass
-class Paren   (list  ,Base):pass
-class Bracket (list  ,Base):pass
-class Braces  (list  ,Base):pass
+
+class Collection():
+    @classmethod
+    def new(klass, args):
+        p=klass(args)
+        for x in args: x.parent=p
+        return p
+
+class Mydef():
+    def __init__(self,k,v):
+        self.k=k
+        self.v=v
+
+class Paren   (Collection, Base):
+    def __init__(self, items):
+        self.items=items
+        self.list=[x for x in items if t(x)!='mydef']
+        self.dict={v(x)[0]:v(x)[1] for x in items if t(x)=='mydef'}
+
+    def eval(self, ps):
+        inps = ps.sub(queue=list(self.items))
+        inps.finish()
+        return inps.stack
+        
+    def run(self,ps):
+        # ps.queue = self.eval(ps) + ps.queue
+        for x in self.eval(ps): x.run(ps)
+                    
 # Maybe?
 class Block (list ,Base):pass
 class Line  (list ,Base):pass
@@ -73,87 +104,101 @@ class Stack (list ,Base):
         ps.stack.extend(self)
 
 class Function(Base):
-    def __init__(self, f, arity):
+    def __init__(self, f, signature):
         self.f=f
-        self.arity=arity
-
+        self.signature=signature
+    
+    @property
+    def arity(self):return len(self.signature)
+        
+    def pushrun(self,ps):
+        if (ps.queue or ps.stack): self.run(ps)
+        else: ps.stack.append(self)
+        
     def run(self, ps):
         if self.arity==1:
-            Sx=ps.getx()
-            ps.stack.extend(
-                [Number(self.f(x)) for x in Sx] if Sx else\
-                [self]
-            )
+            Sx=self.getx(ps)
+            if Sx:
+                x,*xs=Sx      
+                self.f(x).run(ps.sub(queue=xs,dict={**ps.dict,'$':self,'x':x}) if xs else ps)
+            else: self.pushrun(ps)
         elif self.arity==2:
-            Sx,Sy=ps.getxy()
+            Sx,Sy=self.getxy(ps)
             # need to capture in lambdas?
-            ps.stack.extend(
-                [Number(self.f(x,y))     for x in Sx for y in Sy] if Sx and Sy else\
-                [Function(lambda   y:self.f(x,y), 1) for x in Sx] if Sx        else\
-                [Function(lambda x  :self.f(x,y), 1) for y in Sy] if        Sy else\
-                [self]
-            )
+            if is2(Sx) or is2(Sx):    self.run(ps.sub(stack=Sx,queue=Sy))
+            elif is1(Sx) and is1(Sy): self.f(Sx[0],Sy[0]).run(ps)
+            elif is1(Sx):             Function(lambda y:self.f(Sx[0], y    ), [self.signature[1]]).run(ps)
+            elif is1(Sy):             Function(lambda x:self.f(x    , Sy[0]), [self.signature[0]]).run(ps)
+            else:                     self.pushrun(ps)
+    
+    def getx(self, ps):
+        T=lambda x: isinstance(x, self.signature[0])
+        return ps.getx(T)
+        
+    def getxy(self, ps):
+        Tx=lambda x: isinstance(x, self.signature[0])
+        Ty=lambda x: isinstance(x, self.signature[1])
+        return ps.getxy(Tx,Ty)
+      
+
+class Bracket (Collection, Function):
+    def __init__(self, items):
+        self.items=items
+        self.list=[x for x in items if not isinstance(x,Mydef)]
+        self.dict={x.k:x.v for x in items if isinstance(x,Mydef) }
+        #self.patterns= #complex keys
+        self.signature=[Base] # TODO: has to be set of keys
+        
+    def f(self,k):return self.dict[k] if k in self.dict else self.list[k]
+            
+class Braces  (Collection, list  ,Base):pass
 
 # builtin ops
-Plus = Function(lambda x,y:x+y, 2)
+builtin = {'+': Function(lambda x,y:Number(x+y), [Number, Number])}
 
 def asstack(x):return [] if x is None else [x]
+def is1(x): return len(x)==1
+def is2(x): return len(x)>1
 
 class ProgramState():
     def __init__(self, stack=None, queue=None, continuations=None, dict=None):
         self.stack=stack or []
         self.queue=queue or []
         self.continuations=continuations or []
-        self.dict=dict or {
-            '+': Plus,
-        }
+        self.dict=dict or builtin
 
     #TODO: dict.get Symbol must be recursive
     # always returns a stack (list)
-    def eval(self, x):
-        if isinstance(x, Symbol):
-            return [self.dict.get(x,x)]
-        elif isinstance(x, Paren):
-            ps = ProgramState(
-                queue=list(x),
-                continuations=self.continuations+[self],
-                dict=self.dict
-            )
-            ps.finish()
-            return ps.stack
-        else:
-            return asstack(x)
-
-    # def stage2(self, x): #exec
-    #     return x.run(self) # i.e. everything is a program that runs. Number just pushes itself to stack. + requests Number from queue 
-
-    def next(self):
-        x, *xs = self.queuepopeval() #TODO: this will compute entire Paren, we would like .next to step in and do a step at a time
-        self.queue = xs + self.queue
-        if isinstance(x, (Symbol, Number, String, Function)):
-            x.run(self)
-        else: print(f"Exception(next {type(x)})")
-
+    def eval(self, x): return [] if x is None else x.eval(self)
+    def next(self): self.queuepop().run(self)
     def finish(self):
         while self.queue: self.next()
-    def queuepopeval(self):return self.eval(self.queuepop())
+    def queuepopeval(self,T=None):
+        S = self.eval(self.queuepop())
+        if T and is1(S) and not T(S[0]):
+            self.queue=S+self.queue
+            return []
+        else:
+            return S
     def queuepop(self):return self.queue.pop(0) if self.queue else None
-    def stackpop(self):return self.stack.pop()  if self.stack else None
-    def getx(self) -> list:
-        x= asstack(self.stackpop())
-        x= x or self.queuepopeval()
-        return x
-    def getxy(self): # shouldn't we exhaust stack first?
-        x= asstack(self.stackpop())
-        y= self.queuepopeval()
-        x= x or self.queuepopeval()
-        y= y or asstack(self.stackpop())
-        return x,y
+    def stackpop(self,T=None):return [self.stack.pop()] if self.stack and (not T or T(self.stack[-1])) else []
+    def getx (self,T =None        ):return self.stackpop(T ) or self.queuepopeval(T)
+    def getxy(self,Tx=None,Ty=None):return self.stackpop(Tx) ,  self.queuepopeval(Ty)
+    def sub(self,**kw):
+        return ProgramState(**{
+            'continuations':self.continuations+[self],
+            'dict':self.dict,
+            **kw
+        })
+
+code = r"[dom : acl# ( + 5 3)] dom"
+# [1 1 [x]:(x-1$ + x-2$)][5]  8
+# [1 1 _:(x-1$ + x-2$)] 5     8
+# [mymethod[x y]:x*y other[x y z]:x+y+z].mymethod[5 10]   50
+# [a←2+3 f→a].f    5
+# (x)→x+2 3     5
 
 
-
-code = r"{dom : acl# ( + 5 3)}"
-# code = r"(+ 5 3)"
 tree = parser.parse(code)
 # pi=parser.parse_interactive(code)
 # for tok in pi.iter_parse():
@@ -165,7 +210,6 @@ tree = parser.parse(code)
 # for x in CollapseAmbiguities().transform(tree):
 #     print(x.pretty())
 
-print(tree)
 print(tree.pretty())
 tree = MyTransformer().transform(tree)
 print(tree.children)
