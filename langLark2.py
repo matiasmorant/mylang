@@ -150,7 +150,8 @@ class Bracket (Collection, Function):
         self.signature=[Base] # TODO: has to be set of keys
         
     def f(self,k):return self.dict[k] if k in self.dict else self.list[k]
-            
+    def __repr__(self):return f"Bracket({self.dict},{self.list})"
+                
 class Braces  (Collection, list  ,Base):pass
 
 # builtin ops
