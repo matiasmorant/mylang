@@ -63,7 +63,7 @@ class Base():
 class Symbol  (str   ,Base):
     def eval(self, ps): return [ps.dict.get(self,self)]
     def run(self, ps):
-        if self in ps.dict: ps.dict[self].run()
+        if self in ps.dict: ps.dict[self].run(ps)
         else: ps.stack.append(self)
         
 class Number  (float ,Base):pass
@@ -76,10 +76,12 @@ class Collection():
         for x in args: x.parent=p
         return p
 
-class Mydef():
+class Mydef(Base):
     def __init__(self,k,v):
         self.k=k
         self.v=v
+    def run(self, ps):
+        ps.dict[self.k]=self.v
 
 class Paren   (Collection, Base):
     def __init__(self, items):
@@ -88,7 +90,8 @@ class Paren   (Collection, Base):
         self.dict={v(x)[0]:v(x)[1] for x in items if t(x)=='mydef'}
 
     def eval(self, ps):
-        inps = ps.sub(queue=list(self.items))
+        merged_dict = {**ps.dict, **self.dict}
+        inps = ps.sub(queue=list(self.items), dict=merged_dict)
         inps.finish()
         return inps.stack
         
@@ -141,15 +144,22 @@ class Function(Base):
         return ps.getxy(Tx,Ty)
       
 
-class Bracket (Collection, Function):
+class Bracket (Collection, Base):
     def __init__(self, items):
         self.items=items
         self.list=[x for x in items if not isinstance(x,Mydef)]
         self.dict={x.k:x.v for x in items if isinstance(x,Mydef) }
         #self.patterns= #complex keys
-        self.signature=[Base] # TODO: has to be set of keys
         
-    def f(self,k):return self.dict[k] if k in self.dict else self.list[k]
+    def eval(self, ps):
+        merged_dict = {**ps.dict, **self.dict}
+        inps = ps.sub(queue=list(self.list), dict=merged_dict)
+        inps.finish()
+        return inps.stack
+    
+    def run(self, ps):
+        for x in self.eval(ps): x.run(ps)
+    
     def __repr__(self):return f"Bracket({self.dict},{self.list})"
                 
 class Braces  (Collection, list  ,Base):pass
@@ -192,7 +202,8 @@ class ProgramState():
             **kw
         })
 
-code = r"[dom : acl# ( + 5 3)] dom"
+code = r"(myvar: 2 [myvar+3]) 0"
+# r"[dom : acl# ( + 5 3)] dom"
 # [1 1 [x]:(x-1$ + x-2$)][5]  8
 # [1 1 _:(x-1$ + x-2$)] 5     8
 # [mymethod[x y]:x*y other[x y z]:x+y+z].mymethod[5 10]   50
