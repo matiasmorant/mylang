@@ -35,6 +35,9 @@ r"""
 def t(x):
     if isinstance(x,Token ):return x.type
     if isinstance(x,Tree  ):return x.data.value
+    if isinstance(x,Mydef):return 'mydef'
+    if isinstance(x,Paren ):return 'paren'
+    if isinstance(x,Bracket):return 'bracket'
 
 def v(x):
     if isinstance(x,Token ):return x.value
@@ -87,15 +90,27 @@ class Paren   (Collection, Base):
     def __init__(self, items):
         self.items=items
         self.list=[x for x in items if t(x)!='mydef']
-        self.dict={v(x)[0]:v(x)[1] for x in items if t(x)=='mydef'}
+        self.dict={x.k:x.v for x in items if t(x)=='mydef'}
 
     def eval(self, ps):
-        merged_dict = {**ps.dict, **self.dict}
-        inps = ps.sub(queue=list(self.items), dict=merged_dict)
-        inps.finish()
-        return inps.stack
+        # TODO: this is the logic for inline Paren, which eval definitions first,
+        # we also need to implement block Paren.
+        merged_dict = {**ps.dict}
+        if self.dict:
+            for key,val in self.dict.items():
+                inps = ps.sub(queue=[val], dict=merged_dict)
+                inps.finish()
+                if inps.stack:
+                    # TODO: consider non-atomic keys and n-dimensional stack
+                    merged_dict[key] = inps.stack[-1]
+        if self.list:
+            inps = ps.sub(queue=list(self.list), dict=merged_dict)
+            inps.finish()
+            return inps.stack
+        return []
         
     def run(self,ps):
+        # TODO: handle parens with defs (leak or not?)
         # ps.queue = self.eval(ps) + ps.queue
         for x in self.eval(ps): x.run(ps)
                     
@@ -202,30 +217,30 @@ class ProgramState():
             **kw
         })
 
-code = r"(myvar: 2 [myvar+3]) 0"
-# r"[dom : acl# ( + 5 3)] dom"
-# [1 1 [x]:(x-1$ + x-2$)][5]  8
-# [1 1 _:(x-1$ + x-2$)] 5     8
-# [mymethod[x y]:x*y other[x y z]:x+y+z].mymethod[5 10]   50
-# [a←2+3 f→a].f    5
-# (x)→x+2 3     5
+# code = r"([myvar+3] myvar: 2) 0" # 5
+# # r"[dom : acl# ( + 5 3)] dom"
+# # [1 1 [x]:(x-1$ + x-2$)][5]  8
+# # [1 1 _:(x-1$ + x-2$)] 5     8
+# # [mymethod[x y]:x*y other[x y z]:x+y+z].mymethod[5 10]   50
+# # [a←2+3 f→a].f    5
+# # (x)→x+2 3     5
 
 
-tree = parser.parse(code)
-# pi=parser.parse_interactive(code)
-# for tok in pi.iter_parse():
-#     print(pi.parser_state.state_stack)
-#     print(pi.parser_state.value_stack)
-#     print(pi.pretty())
-#     print(tok)
+# tree = parser.parse(code)
+# # pi=parser.parse_interactive(code)
+# # for tok in pi.iter_parse():
+# #     print(pi.parser_state.state_stack)
+# #     print(pi.parser_state.value_stack)
+# #     print(pi.pretty())
+# #     print(tok)
 
-# for x in CollapseAmbiguities().transform(tree):
-#     print(x.pretty())
+# # for x in CollapseAmbiguities().transform(tree):
+# #     print(x.pretty())
 
-print(tree.pretty())
-tree = MyTransformer().transform(tree)
-print(tree.children)
-ps = ProgramState(queue=tree.children)
-while ps.queue:
-    ps.next()
-    print(ps.stack)
+# print(tree.pretty())
+# tree = MyTransformer().transform(tree)
+# print(tree.children)
+# ps = ProgramState(queue=tree.children)
+# while ps.queue:
+#     ps.next()
+#     print(ps.stack)
