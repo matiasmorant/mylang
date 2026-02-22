@@ -1,0 +1,42 @@
+[
+  {
+    "name": "add_1",
+    "code": "3+2",
+    "expected": 5
+  },
+  {
+    "name": "list_get",
+    "code": "[5] 0",
+    "expected": 5
+  },
+  {
+    "name": "inline_paren",
+    "code": "([myvar+3] myvar: 2) 0",
+    "expected": 5
+  },
+  {
+    "name": "object_method",
+    "code": "[dom : acl# ( + 5 3)] dom",
+    "expected": ["acl#", 8]
+  },
+  {
+    "name": "fibonacci_1",
+    "code": "[1 1 [x]:(x-1$ + x-2$)][5]",
+    "expected": 8
+  },
+  {
+    "name": "underscore_method",
+    "code": "[1 1 _:(x-1$ + x-2$)] 5",
+    "expected": 8
+  },
+  {
+    "name": "multi_method_object",
+    "code": "[mymethod[x y]:x*y other[x y z]:x+y+z].mymethod[5 10]",
+    "expected": 50
+  },
+  {
+    "name": "variable_assignment",
+    "code": "[a:2+3 f:a] f",
+    "expected": 5
+  }
+]

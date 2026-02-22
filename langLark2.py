@@ -1,6 +1,7 @@
 from lark import Lark, Transformer, v_args, Token, Tree
 from lark.visitors import CollapseAmbiguities
 
+import inspect
 import logging
 from lark import logger
 logger.setLevel(logging.DEBUG)
@@ -11,16 +12,18 @@ logger.setLevel(logging.DEBUG)
 # each ()[]{}"" define their own parser?
 parser = Lark(
 r"""
-    start: _listof{expr}
-    ?expr: SYM | NUMBER | STRING | paren | bracket | braces | chunk
+    start: _listof{expr}?
+    ?expr: chunk | _atom
+    _atom: SYM | NUMBER | STRING | paren | bracket | braces
+    chunk: _atom _atom+
+    chain: _listof{expr}
     _S: WS
-    mydef: expr _S* ":" _S* expr
-    _listof{x}: (_S* x (_S+ x)* _S*)?
-    _defex: expr|mydef
-    paren: "(" _listof{_defex} ")"
-    bracket: "[" _listof{_defex} "]"
-    braces: "{" _listof{_defex} "}"
-    chunk: expr ~ 2
+    mydef: expr _S* ":" _S* chain
+    _listof{x}: (_S* x (_S+ x)* _S*)
+    _defex: chain|mydef
+    paren: "(" _listof{_defex}? ")"
+    bracket: "[" _listof{_defex}? "]"
+    braces: "{" _listof{_defex}? "}"
     SYM: CNAME | /[*+-\/=`!#$%&?@^~,.;<>|]/
     %import common.CNAME
     %import common.NUMBER
@@ -35,9 +38,6 @@ r"""
 def t(x):
     if isinstance(x,Token ):return x.type
     if isinstance(x,Tree  ):return x.data.value
-    if isinstance(x,Mydef):return 'mydef'
-    if isinstance(x,Paren ):return 'paren'
-    if isinstance(x,Bracket):return 'bracket'
 
 def v(x):
     if isinstance(x,Token ):return x.value
@@ -53,17 +53,19 @@ class MyTransformer(Transformer):
     def paren   (self, *args):return Paren.new(args)
     def bracket (self, *args):return Bracket.new(args)
     def braces  (self, *args):return Braces.new(args)
-    def chunk   (self, *args):return Paren.new(args)
+    def chain   (self, *args):return Chain.new(args)
+    def chunk   (self, *args):return Chunk.new(args)
     def mydef   (self, k,v):return Mydef(k,v)
 
 class Base():
     def eval(self, ps):return [self]
     def run(self, ps):
         ps.stack.append(self)
-    # def __repr__(self):
-    #     return f"({type(self)} {str(self)})"
+    def __repr__(self):
+        return f"{type(self).__name__}({hex(id(self))})"
 
 class Symbol  (str   ,Base):
+    def __repr__(self): return self
     def eval(self, ps): return [ps.dict.get(self,self)]
     def run(self, ps):
         if self in ps.dict: ps.dict[self].run(ps)
@@ -80,33 +82,48 @@ class Collection():
         return p
 
 class Mydef(Base):
+    def __repr__(self): return f"{self.k}:{self.v}"
     def __init__(self,k,v):
         self.k=k
         self.v=v
+
+    def eval(self, ps): return self.v.eval(ps)
+
     def run(self, ps):
-        ps.dict[self.k]=self.v
+        if stack:=self.eval(ps):
+            ps.dict[self.k]=stack[-1]
+
+class Chain   (Collection, Base):
+    def __repr__(self): return f"({' '.join([repr(x) for x in self.list])})"
+    def __init__(self, items):
+        self.list=list(items)
+    def eval(self, ps):
+        inps = ps.sub(queue=self.list)
+        inps.finish()
+        return inps.stack
+        
+    def run(self,ps):
+        for x in self.eval(ps): x.run(ps)
+
+class Chunk   (Chain):
+    def __repr__(self): return f"({''.join([repr(x) for x in self.list])})"
 
 class Paren   (Collection, Base):
+    def __repr__(self): return f"({' '.join([repr(x) for x in self.items])})"
     def __init__(self, items):
-        self.items=items
-        self.list=[x for x in items if t(x)!='mydef']
-        self.dict={x.k:x.v for x in items if t(x)=='mydef'}
-
+        # self.items=items
+        self.list=[x for x in items if not isinstance(x,Mydef)]
+        self.dict=[x for x in items if     isinstance(x,Mydef)]
+        self.items=self.dict+[Mydef(Number(i),x) for i,x in enumerate(self.list)]
     def eval(self, ps):
         # TODO: this is the logic for inline Paren, which eval definitions first,
         # we also need to implement block Paren.
-        merged_dict = {**ps.dict}
-        if self.dict:
-            for key,val in self.dict.items():
-                inps = ps.sub(queue=[val], dict=merged_dict)
-                inps.finish()
-                if inps.stack:
-                    # TODO: consider non-atomic keys and n-dimensional stack
-                    merged_dict[key] = inps.stack[-1]
-        if self.list:
-            inps = ps.sub(queue=list(self.list), dict=merged_dict)
-            inps.finish()
-            return inps.stack
+        inps = ps.sub(queue=list(self.items))
+        inps.finish()
+        if self.items:
+            v=inps.dict.get(self.items[-1].k)
+            if isinstance(v, Function): v.closure=inps.dict
+            return [v] if v else []
         return []
         
     def run(self,ps):
@@ -122,9 +139,10 @@ class Stack (list ,Base):
         ps.stack.extend(self)
 
 class Function(Base):
-    def __init__(self, f, signature):
+    def __init__(self, f, signature, closure=None):
         self.f=f
         self.signature=signature
+        self.closure=closure or dict()
     
     @property
     def arity(self):return len(self.signature)
@@ -138,7 +156,9 @@ class Function(Base):
             Sx=self.getx(ps)
             if Sx:
                 x,*xs=Sx      
-                self.f(x).run(ps.sub(queue=xs,dict={**ps.dict,'$':self,'x':x}) if xs else ps)
+                inps=ps.sub(queue=xs,dict={**self.closure,'$':self,'x':x})
+                self.f(x).run(inps)
+                for x in inps.stack: x.run(ps)
             else: self.pushrun(ps)
         elif self.arity==2:
             Sx,Sy=self.getxy(ps)
@@ -159,23 +179,25 @@ class Function(Base):
         return ps.getxy(Tx,Ty)
       
 
-class Bracket (Collection, Base):
+class Bracket (Collection, Function):
     def __init__(self, items):
         self.items=items
         self.list=[x for x in items if not isinstance(x,Mydef)]
         self.dict={x.k:x.v for x in items if isinstance(x,Mydef) }
         #self.patterns= #complex keys
         
-    def eval(self, ps):
-        merged_dict = {**ps.dict, **self.dict}
-        inps = ps.sub(queue=list(self.list), dict=merged_dict)
-        inps.finish()
-        return inps.stack
-    
-    def run(self, ps):
-        for x in self.eval(ps): x.run(ps)
-    
-    def __repr__(self):return f"Bracket({self.dict},{self.list})"
+        for i, item in enumerate(self.list):
+            self.dict[i] = item
+            
+        def lookup(key):
+            result = self.dict.get(key)
+            if result is not None:
+                return result # TODO: value is a Paren, it must be evaled first
+            return self
+        
+        super().__init__(lookup, [object])
+
+    def run(self, ps): Function.run(self, ps)
                 
 class Braces  (Collection, list  ,Base):pass
 
@@ -191,14 +213,16 @@ class ProgramState():
         self.stack=stack or []
         self.queue=queue or []
         self.continuations=continuations or []
-        self.dict=dict or builtin
+        self.dict=dict or {**builtin}
 
+    def __repr__(self): return f'{hex(id(self))}| {self.code_repr()}'
     #TODO: dict.get Symbol must be recursive
     # always returns a stack (list)
     def eval(self, x): return [] if x is None else x.eval(self)
-    def next(self): self.queuepop().run(self)
+    def next(self): debug_hook(); self.queuepop().run(self)
     def finish(self):
         while self.queue: self.next()
+        debug_hook('STATE RETURN')
     def queuepopeval(self,T=None):
         S = self.eval(self.queuepop())
         if T and is1(S) and not T(S[0]):
@@ -213,34 +237,53 @@ class ProgramState():
     def sub(self,**kw):
         return ProgramState(**{
             'continuations':self.continuations+[self],
-            'dict':self.dict,
+            'dict':dict(self.dict),
             **kw
         })
+    def code_repr(self):
+        neat=lambda x:' '.join(map(repr,x))
+        return f'{neat(self.stack)} ⋄ {neat(self.queue)}'
 
-# code = r"([myvar+3] myvar: 2) 0" # 5
-# # r"[dom : acl# ( + 5 3)] dom"
-# # [1 1 [x]:(x-1$ + x-2$)][5]  8
-# # [1 1 _:(x-1$ + x-2$)] 5     8
-# # [mymethod[x y]:x*y other[x y z]:x+y+z].mymethod[5 10]   50
-# # [a←2+3 f→a].f    5
-# # (x)→x+2 3     5
+def debugps(up=1):
+    var=inspect.stack()[up].frame.f_locals
+    for x in var.values():
+        if isinstance(x,ProgramState):
+            print({k:v for k,v in x.dict.items() if k not in builtin})
+            for c in x.continuations+[x]: print(c)
+            # print(x.code_repr())
+    if ('self' in var) and not isinstance(var['self'],ProgramState):
+        print(type(var['self']))
+
+def debugger(msg='STATE'): print(msg); debugps(2); input('>')
+debug_hook = lambda *x,**kw:None
+
+if __name__=='__main__':
+    debug_hook = debugger
+
+    # code = r"(myvar + 3 myvar: 2)" # 5
+    code = r"([myvar+3] myvar: 2) 0" # 5
+    # r"[dom : acl# ( + 5 3)] dom"
+    # [1 1 [x]:(x-1$ + x-2$)][5]  8
+    # [1 1 _:(x-1$ + x-2$)] 5     8
+    # [mymethod[x y]:x*y other[x y z]:x+y+z].mymethod[5 10]   50
+    # [a←2+3 f→a].f    5
+    # (x)→x+2 3     5
 
 
-# tree = parser.parse(code)
-# # pi=parser.parse_interactive(code)
-# # for tok in pi.iter_parse():
-# #     print(pi.parser_state.state_stack)
-# #     print(pi.parser_state.value_stack)
-# #     print(pi.pretty())
-# #     print(tok)
+    tree = parser.parse(code)
+    # pi=parser.parse_interactive(code)
+    # for tok in pi.iter_parse():
+    #     print(pi.parser_state.state_stack)
+    #     print(pi.parser_state.value_stack)
+    #     print(pi.pretty())
+    #     print(tok)
 
-# # for x in CollapseAmbiguities().transform(tree):
-# #     print(x.pretty())
+    # for x in CollapseAmbiguities().transform(tree):
+    #     print(x.pretty())
 
-# print(tree.pretty())
-# tree = MyTransformer().transform(tree)
-# print(tree.children)
-# ps = ProgramState(queue=tree.children)
-# while ps.queue:
-#     ps.next()
-#     print(ps.stack)
+    print(tree.pretty())
+    tree = MyTransformer().transform(tree)
+    print(tree.children)
+    ps = ProgramState(queue=tree.children)
+    ps.finish()
+    #     print(ps.stack)
