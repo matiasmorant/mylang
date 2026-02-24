@@ -65,8 +65,18 @@ class Base():
         return f"{type(self).__name__}({hex(id(self))})"
 
 class Symbol  (str   ,Base):
+    def __init__(self, content):
+        self.evaled=False
+
     def __repr__(self): return self
-    def eval(self, ps): return [ps.dict.get(self,self)]
+
+    def eval(self, ps):
+        if self.evaled:
+            return [self]
+        else:
+            self.evaled=True
+            return [ps.dict.get(self,self)]
+
     def run(self, ps):
         if self in ps.dict: ps.dict[self].run(ps)
         else: ps.stack.append(self)
@@ -114,17 +124,15 @@ class Paren   (Collection, Base):
         # self.items=items
         self.list=[x for x in items if not isinstance(x,Mydef)]
         self.dict=[x for x in items if     isinstance(x,Mydef)]
-        self.items=self.dict+[Mydef(Number(i),x) for i,x in enumerate(self.list)]
-    def eval(self, ps):
         # TODO: this is the logic for inline Paren, which eval definitions first,
         # we also need to implement block Paren.
+        self.items=self.dict+[Mydef(Number(i),x) for i,x in enumerate(self.list)]
+    def eval(self, ps):
+        if not self.items: return []
         inps = ps.sub(queue=list(self.items))
         inps.finish()
-        if self.items:
-            v=inps.dict.get(self.items[-1].k)
-            if isinstance(v, Function): v.closure=inps.dict
-            return [v] if v else []
-        return []
+        v=inps.dict.get(self.items[-1].k)
+        return [v] if v else []
         
     def run(self,ps):
         # TODO: handle parens with defs (leak or not?)
@@ -181,6 +189,7 @@ class Function(Base):
 
 class Bracket (Collection, Function):
     def __init__(self, items):
+        self.evaled=False
         self.items=items
         self.list=[x for x in items if not isinstance(x,Mydef)]
         self.dict={x.k:x.v for x in items if isinstance(x,Mydef) }
@@ -197,7 +206,13 @@ class Bracket (Collection, Function):
         
         super().__init__(lookup, [object])
 
-    def run(self, ps): Function.run(self, ps)
+    def eval(self, ps):
+        if not self.evaled:
+            self.evaled=True
+            self.closure=ps.dict;
+        return [self]
+
+    def run(self, ps): self.eval(ps); Function.run(self,ps)
                 
 class Braces  (Collection, list  ,Base):pass
 
@@ -260,8 +275,16 @@ debug_hook = lambda *x,**kw:None
 if __name__=='__main__':
     debug_hook = debugger
 
+    import readline
+    readline.set_startup_hook(lambda: readline.insert_text("([myvar+3] myvar: 2) 0"))
+    try:
+        code=input('>')
+    finally:
+        # Clear the hook so it doesn't affect future inputs
+        readline.set_startup_hook()
+
     # code = r"(myvar + 3 myvar: 2)" # 5
-    code = r"([myvar+3] myvar: 2) 0" # 5
+    # code = r"([myvar+3] myvar: 2) 0" # 5
     # r"[dom : acl# ( + 5 3)] dom"
     # [1 1 [x]:(x-1$ + x-2$)][5]  8
     # [1 1 _:(x-1$ + x-2$)] 5     8
