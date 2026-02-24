@@ -10,9 +10,14 @@
     "expected": 5
   },
   {
-    "name": "inline_paren",
+    "name": "inline_paren_closure",
     "code": "([myvar+3] myvar: 2) 0",
     "expected": 5
+  },
+  {
+    "name": "list_get2",
+    "code": "([10 20 30] a a:1)",
+    "expected": 20
   },
   {
     "name": "object_method",

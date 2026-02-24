@@ -20,10 +20,11 @@ r"""
     _S: WS
     mydef: expr _S* ":" _S* chain
     _listof{x}: (_S* x (_S+ x)* _S*)
-    _defex: chain|mydef
-    paren: "(" _listof{_defex}? ")"
+    _defch: chain|mydef
+    _defex: expr|mydef
+    paren: "(" _listof{_defch}? ")"
     bracket: "[" _listof{_defex}? "]"
-    braces: "{" _listof{_defex}? "}"
+    braces: "{" _listof{_defch}? "}"
     SYM: CNAME | /[*+-\/=`!#$%&?@^~,.;<>|]/
     %import common.CNAME
     %import common.NUMBER
